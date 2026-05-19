@@ -5,3 +5,5 @@ SpeechRecognition>=3.10.0
 pyaudio>=0.2.14
 rich>=13.0.0
 pydantic>=2.0.0
+opencv-python>=4.9.0
+numpy>=1.26.0
