@@ -1,9 +1,26 @@
+# AI / LLM
+openai>=1.50.0
 anthropic>=0.40.0
+
+# Browser automation
 playwright>=1.48.0
-python-dotenv>=1.0.0
-SpeechRecognition>=3.10.0
-pyaudio>=0.2.14
-rich>=13.0.0
-pydantic>=2.0.0
+
+# Video & audio processing
 opencv-python>=4.9.0
 numpy>=1.26.0
+librosa>=0.10.0
+soundfile>=0.12.0
+openai-whisper>=20231117
+
+# Web / HTTP
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# CLI & utilities
+python-dotenv>=1.0.0
+rich>=13.0.0
+pydantic>=2.0.0
+
+# Voice input (optional)
+SpeechRecognition>=3.10.0
+pyaudio>=0.2.14

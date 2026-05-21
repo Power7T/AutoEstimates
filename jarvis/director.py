@@ -1,333 +1,447 @@
 """
-Jarvis Director Mode — autonomous video editing.
+Jarvis Director — fully autonomous video editing pipeline.
 
 Pipeline:
-  1. Extract frames + metadata from every clip
-  2. Send to Claude vision for scene-by-scene analysis
-  3. Claude acts as director and produces a full EditPlan
-  4. Execute the plan in CapCut via CapCutController
+  1. Analyze every clip with Gemini vision + Whisper (understand what's REALLY there)
+  2. Analyze audio: beat detection, energy map, drops
+  3. Fetch current trends
+  4. Load user taste profile
+  5. Select best viral template for this content
+  6. Claude plans the complete edit using all context
+  7. Execute every step in CapCut via vision-based controller
+  8. Ask user to rate → update taste profile
 """
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
 
-import anthropic
-
-from .frame_extractor import ClipAnalysisData, extract_multi_clip_data
-from .tools import TOOLS
+from .config import cfg
+from .openrouter import router
+from .video_analyzer import VideoAnalyzer, ClipUnderstanding
+from .audio_analyzer import analyze_audio, select_beat_cut_points, AudioAnalysis
+from .templates import EditingTemplate, select_template, TEMPLATES
+from .trends import get_current_trends
+from .taste_learner import TasteLearner
+from .vision_controller import VisionController
 
 
 # ---------------------------------------------------------------------------
-# Edit plan data model
+# Edit plan
 # ---------------------------------------------------------------------------
-
-@dataclass
-class TextOverlay:
-    text: str
-    position: str = "bottom"
-    start_seconds: float = 0
-    duration_seconds: float = 3
-    font_size: str = "medium"
-    color: str = "white"
-
-
-@dataclass
-class TransitionPlan:
-    after_clip_index: int
-    transition_type: str = "fade"
-    duration_seconds: float = 0.5
-
 
 @dataclass
 class ClipEdit:
     source_path: str
     clip_index: int
     trim_start: float = 0.0
-    trim_end: float | None = None      # None = keep original end
+    trim_end: float | None = None
     speed_multiplier: float = 1.0
+    speed_ramp: str | None = None       # "drop" | "slow_mo" | None
     volume: float = 1.0
     filter_name: str | None = None
     filter_intensity: float = 0.7
+    effects: list[str] = field(default_factory=list)
+    stabilize: bool = False
+    auto_enhance: bool = False
+
+
+@dataclass
+class TextLayer:
+    text: str
+    position: str = "bottom"
+    start_seconds: float = 0
+    duration_seconds: float = 3
+    font_size: str = "medium"
+    color: str = "white"
+    animated: bool = False
+    style: str = "clean"
 
 
 @dataclass
 class EditPlan:
     project_name: str
-    aspect_ratio: str = "16:9"
-    clips: list[ClipEdit] = field(default_factory=list)
-    transitions: list[TransitionPlan] = field(default_factory=list)
-    text_overlays: list[TextOverlay] = field(default_factory=list)
-    music_query: str | None = None
-    music_volume: float = 0.4
-    export_resolution: str = "1080p"
-    export_fps: int = 30
-    director_notes: str = ""          # Claude's creative reasoning
+    aspect_ratio: str
+    template_name: str
+    clips: list[ClipEdit]
+    beat_cut_timestamps: list[float]
+    text_layers: list[TextLayer]
+    use_auto_captions: bool
+    music_query: str | None
+    music_volume: float
+    color_grade: str
+    add_vignette: bool
+    add_film_grain: bool
+    add_light_leak: bool
+    export_resolution: str
+    export_fps: int
+    director_notes: str
 
 
-# ---------------------------------------------------------------------------
-# Director
-# ---------------------------------------------------------------------------
+DIRECTOR_SYSTEM = """You are Jarvis, an elite AI video director with years of experience
+creating viral content for Instagram Reels, TikTok, and YouTube Shorts.
 
-DIRECTOR_SYSTEM_PROMPT = """You are Jarvis, an elite AI video director.
-You will be given metadata and sample frames from one or more raw video clips.
-Your job is to produce a complete, high-quality edit plan as a structured JSON object.
+You have been given:
+- Deep analysis of every video clip (what's in them, mood, quality, best moments)
+- Audio analysis (beats, energy, drops, mood)
+- Current viral trends
+- The user's personal taste profile
+- A proven editing template structure
 
-Style guidelines you must always apply:
-- Keep only the best moments; cut any shaky, blurry, or boring footage
-- Use smooth transitions; prefer dissolve/fade for calm content, glitch/flash for energetic content
-- Add concise, impactful text overlays at key moments
-- Choose music that matches the overall mood you detect in the footage
-- Apply a consistent color grade / filter across all clips for a polished look
-- Export at 1080p 30fps unless the source is clearly 4K-worthy
+Your job: produce the PERFECT edit plan as a JSON object.
 
-Respond ONLY with a JSON object matching this exact schema — no commentary, no markdown fences:
-{
+Rules:
+- Put the most attention-grabbing moment FIRST (hook engineering)
+- Only keep the best moments from each clip (quality > quantity)
+- Sync every cut to a beat timestamp when possible
+- Apply speed ramps at music drop points
+- Use color grade that matches the mood of the content
+- Add text overlays that add context or emotion — not just captions
+- Choose music that fits the emotional arc you're creating
+- Apply the template structure strictly
+- Factor in the user's taste profile preferences
+
+Return ONLY valid JSON. No explanation. No markdown."""
+
+DIRECTOR_PROMPT = """Create the complete edit plan for this video project.
+
+=== CLIP ANALYSIS ===
+{clips_analysis}
+
+=== AUDIO ANALYSIS ===
+Tempo: {tempo_bpm} BPM
+Mood: {audio_mood}
+Beat timestamps (first 20): {beat_timestamps}
+Drop timestamps: {drop_timestamps}
+Energy drops at: {high_energy}
+
+=== CURRENT TRENDS ===
+{trends}
+
+=== USER TASTE PROFILE ===
+{taste_profile}
+
+=== TEMPLATE TO FOLLOW ===
+{template}
+
+Project name: {project_name}
+Platform: {platform}
+Style hint: {style_hint}
+
+Return JSON matching exactly this schema:
+{{
   "project_name": "string",
-  "aspect_ratio": "16:9 | 9:16 | 1:1",
-  "director_notes": "one paragraph explaining your creative choices",
+  "aspect_ratio": "9:16|16:9|1:1",
+  "template_name": "string",
+  "director_notes": "paragraph explaining creative choices",
   "clips": [
-    {
+    {{
       "source_path": "string",
       "clip_index": 0,
       "trim_start": 0.0,
       "trim_end": null,
       "speed_multiplier": 1.0,
+      "speed_ramp": "drop|slow_mo|null",
       "volume": 1.0,
-      "filter_name": "cinematic | vintage | bright | moody | black_white | warm | cool | null",
-      "filter_intensity": 0.7
-    }
+      "filter_name": "cinematic|warm|cool|moody|vintage|bright|black_white|null",
+      "filter_intensity": 0.7,
+      "effects": [],
+      "stabilize": false,
+      "auto_enhance": false
+    }}
   ],
-  "transitions": [
-    {"after_clip_index": 0, "transition_type": "fade", "duration_seconds": 0.5}
-  ],
-  "text_overlays": [
-    {
+  "beat_cut_timestamps": [0.0],
+  "text_layers": [
+    {{
       "text": "string",
-      "position": "top | center | bottom",
+      "position": "top|center|bottom",
       "start_seconds": 0.0,
       "duration_seconds": 3.0,
-      "font_size": "small | medium | large",
-      "color": "white"
-    }
+      "font_size": "small|medium|large",
+      "color": "white",
+      "animated": false,
+      "style": "clean|bold|kinetic"
+    }}
   ],
+  "use_auto_captions": false,
   "music_query": "string or null",
   "music_volume": 0.4,
+  "color_grade": "orange_teal|warm|cool|moody|high_contrast|vintage|bright",
+  "add_vignette": true,
+  "add_film_grain": false,
+  "add_light_leak": false,
   "export_resolution": "1080p",
   "export_fps": 30
-}"""
+}}"""
 
 
 class JarvisDirector:
-    """Autonomous video editor: analyzes footage, plans and executes the edit."""
+    """Fully autonomous video editor — analyzes, plans, and executes."""
 
-    def __init__(self, client: anthropic.Anthropic, capcut, console=None):
-        self.client = client
-        self.capcut = capcut
+    def __init__(self, controller: VisionController, console=None):
+        self.controller = controller
         self.console = console
+        self.video_analyzer = VideoAnalyzer()
+        self.taste = TasteLearner()
 
-    def _log(self, msg: str):
+    def _log(self, msg: str, style: str = "cyan"):
         if self.console:
-            self.console.print(f"[cyan]Jarvis ▸[/cyan] {msg}")
+            self.console.print(f"[{style}]Jarvis ▸[/{style}] {msg}")
         else:
             print(f"Jarvis ▸ {msg}")
 
     # ------------------------------------------------------------------
-    # Public entry point
+    # Main pipeline
     # ------------------------------------------------------------------
 
     async def direct(
         self,
         media_paths: list[str],
-        style_hint: str = "cinematic",
         project_name: str = "Jarvis Edit",
+        platform: str = "instagram",
+        style_hint: str = "cinematic",
+        music_path: str | None = None,
     ) -> EditPlan:
-        """
-        Full autonomous pipeline:
-          analyze → plan → execute in CapCut → return EditPlan
-        """
-        self._log(f"Analyzing {len(media_paths)} clip(s)...")
-        clips_data = extract_multi_clip_data(media_paths, frames_per_clip=5)
 
-        if not clips_data:
-            raise ValueError("No valid video clips found at the provided paths.")
+        # --- Step 1: Deep clip analysis ---
+        self._log(f"Watching and understanding {len(media_paths)} clip(s)...")
+        clip_analyses = self.video_analyzer.analyze_all(media_paths)
+        if not clip_analyses:
+            raise ValueError("No valid clips could be analyzed.")
 
-        self._log("Sending footage to Claude for analysis and edit planning...")
-        plan = await self._plan_edit(clips_data, style_hint, project_name)
+        # --- Step 2: Audio analysis ---
+        self._log("Detecting beats, energy, and music drops...")
+        audio_path = music_path or media_paths[0]
+        try:
+            audio = analyze_audio(audio_path)
+        except Exception as e:
+            self._log(f"Audio analysis skipped: {e}", "yellow")
+            audio = None
 
-        self._log(f"Edit plan ready. Director's note: {plan.director_notes[:120]}...")
+        # --- Step 3: Trends ---
+        trends = {}
+        if cfg.enable_trends:
+            self._log("Checking current viral trends...")
+            try:
+                trends = get_current_trends()
+            except Exception:
+                pass
+
+        # --- Step 4: Select template ---
+        dominant_mood = max(
+            clip_analyses, key=lambda c: c.energy_level
+        ).mood if clip_analyses else "neutral"
+        total_duration = sum(c.duration_seconds for c in clip_analyses)
+        template = select_template(dominant_mood, platform, total_duration, has_speech=any(c.transcript for c in clip_analyses))
+
+        # --- Step 5: AI director plans the edit ---
+        self._log("Claude is planning the perfect edit...")
+        plan = self._plan_edit(
+            clip_analyses=clip_analyses,
+            audio=audio,
+            trends=trends,
+            template=template,
+            project_name=project_name,
+            platform=platform,
+            style_hint=style_hint,
+        )
+
+        self._log(f"Edit planned. Director's note: {plan.director_notes[:100]}...")
+
+        # --- Step 6: Execute in CapCut ---
         self._log("Executing edit in CapCut...")
-        await self._execute_plan(plan)
+        await self._execute(plan)
 
-        self._log("All done! Your video is ready.")
         return plan
 
     # ------------------------------------------------------------------
-    # Step 1: Analyze footage and produce an EditPlan via Claude vision
+    # Planning
     # ------------------------------------------------------------------
 
-    async def _plan_edit(
+    def _plan_edit(
         self,
-        clips_data: list[ClipAnalysisData],
-        style_hint: str,
+        clip_analyses: list[ClipUnderstanding],
+        audio: AudioAnalysis | None,
+        trends: dict,
+        template: EditingTemplate,
         project_name: str,
+        platform: str,
+        style_hint: str,
     ) -> EditPlan:
-        messages = self._build_analysis_messages(clips_data, style_hint, project_name)
 
-        response = self.client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4096,
-            system=DIRECTOR_SYSTEM_PROMPT,
-            messages=messages,
+        # Build clips summary for the prompt
+        clips_text = "\n\n".join(
+            f"Clip {i} — {c.path}\n"
+            f"  Duration: {c.duration_seconds}s | Mood: {c.mood} | Energy: {c.energy_level:.1f}\n"
+            f"  Scene type: {c.scene_type} | Quality: {c.quality_score:.1f}\n"
+            f"  Content: {c.content_description}\n"
+            f"  Best moments: {[(m.timestamp, m.reason) for m in c.key_moments[:3]]}\n"
+            f"  Suggested filter: {c.suggested_filter} | Suggested effect: {c.suggested_effect}\n"
+            f"  Transcript: {c.transcript[:200] if c.transcript else 'none'}"
+            for i, c in enumerate(clip_analyses)
         )
 
-        raw = response.content[0].text.strip()
-        # Strip accidental markdown fences if present
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        data = json.loads(raw)
+        beat_timestamps = (audio.beat_timestamps[:20] if audio else [])
+        drop_timestamps = (audio.drop_timestamps[:5] if audio else [])
+        high_energy_times = (
+            [i for i, e in enumerate(audio.energy_curve) if e > 0.8][:10]
+            if audio else []
+        )
+
+        prompt = DIRECTOR_PROMPT.format(
+            clips_analysis=clips_text,
+            tempo_bpm=audio.tempo_bpm if audio else "unknown",
+            audio_mood=audio.mood if audio else "neutral",
+            beat_timestamps=beat_timestamps,
+            drop_timestamps=drop_timestamps,
+            high_energy=high_energy_times,
+            trends=json.dumps(trends, indent=2)[:1500],
+            taste_profile=self.taste.get_profile_summary(),
+            template=json.dumps({
+                "name": template.name,
+                "segments": [
+                    {"name": s.name, "energy": s.energy, "cut_frequency": s.cut_frequency,
+                     "effects": s.effects, "notes": s.notes}
+                    for s in template.segments
+                ],
+                "music_mood": template.music_mood,
+                "color_grade": template.color_grade,
+            }, indent=2),
+            project_name=project_name,
+            platform=platform,
+            style_hint=style_hint,
+        )
+
+        data = router.complete_json(
+            prompt=prompt,
+            system=DIRECTOR_SYSTEM,
+            model=cfg.models.director,
+            max_tokens=4096,
+        )
+
         return self._parse_plan(data)
 
-    def _build_analysis_messages(
-        self,
-        clips_data: list[ClipAnalysisData],
-        style_hint: str,
-        project_name: str,
-    ) -> list[dict]:
-        """Build the multimodal message that sends frames + metadata to Claude."""
-        content: list[dict] = []
-
-        content.append({
-            "type": "text",
-            "text": (
-                f"Project name: {project_name}\n"
-                f"Style hint: {style_hint}\n"
-                f"Number of clips: {len(clips_data)}\n\n"
-                "Below you will find metadata and sample frames for each clip. "
-                "Analyze all footage carefully and produce the best possible edit plan."
-            ),
-        })
-
-        for i, clip in enumerate(clips_data):
-            content.append({
-                "type": "text",
-                "text": (
-                    f"\n--- Clip {i} ---\n"
-                    f"Path: {clip.path}\n"
-                    f"Duration: {clip.duration_seconds:.1f}s  FPS: {clip.fps}  "
-                    f"Resolution: {clip.width}x{clip.height}\n"
-                    f"Estimated scenes: {clip.estimated_scenes}  "
-                    f"Has audio: {clip.has_audio}\n"
-                    f"Sample frames ({len(clip.sample_frames)}):"
-                ),
-            })
-            for b64 in clip.sample_frames:
-                content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/jpeg",
-                        "data": b64,
-                    },
-                })
-
-        return [{"role": "user", "content": content}]
-
     # ------------------------------------------------------------------
-    # Step 2: Execute the EditPlan in CapCut
+    # Execution
     # ------------------------------------------------------------------
 
-    async def _execute_plan(self, plan: EditPlan):
-        """Drive CapCut via the controller to carry out every step of the plan."""
-        # Open / create project
-        await self.capcut.execute_tool("open_project", {
-            "project_name": plan.project_name,
-            "create_new": True,
-        })
+    async def _execute(self, plan: EditPlan):
+        # 1. Create project
+        self._log("Creating CapCut project...")
+        await self.controller.execute_tool("open_project", {"project_name": plan.project_name})
 
-        # Import and configure each clip
-        for clip_edit in plan.clips:
-            self._log(f"Importing clip {clip_edit.clip_index}: {clip_edit.source_path}")
-            await self.capcut.execute_tool("import_media", {"file_path": clip_edit.source_path})
+        # 2. Set aspect ratio
+        await self.controller.execute_tool("crop_video", {"aspect_ratio": plan.aspect_ratio})
 
-            if clip_edit.trim_end is not None:
-                await self.capcut.execute_tool("trim_clip", {
-                    "clip_index": clip_edit.clip_index,
-                    "start_seconds": clip_edit.trim_start,
-                    "end_seconds": clip_edit.trim_end,
+        # 3. Import and configure each clip
+        for clip in plan.clips:
+            self._log(f"Importing clip {clip.clip_index}: {clip.source_path.split('/')[-1]}")
+            await self.controller.execute_tool("import_media", {"file_path": clip.source_path})
+
+            if clip.trim_end is not None:
+                await self.controller.execute_tool("trim_clip", {
+                    "clip_index": clip.clip_index,
+                    "start_seconds": clip.trim_start,
+                    "end_seconds": clip.trim_end,
                 })
 
-            if clip_edit.speed_multiplier != 1.0:
-                await self.capcut.execute_tool("adjust_speed", {
-                    "clip_index": clip_edit.clip_index,
-                    "speed_multiplier": clip_edit.speed_multiplier,
+            if clip.stabilize:
+                await self.controller.execute_tool("stabilize_clip", {"clip_index": clip.clip_index})
+
+            if clip.auto_enhance:
+                await self.controller.execute_tool("auto_enhance", {"clip_index": clip.clip_index})
+
+            if clip.speed_ramp:
+                await self.controller.execute_tool("apply_speed_ramp", {
+                    "clip_index": clip.clip_index,
+                    "ramp_type": clip.speed_ramp,
+                })
+            elif clip.speed_multiplier != 1.0:
+                await self.controller.execute_tool("adjust_speed", {
+                    "clip_index": clip.clip_index,
+                    "speed_multiplier": clip.speed_multiplier,
                 })
 
-            if clip_edit.volume != 1.0:
-                await self.capcut.execute_tool("adjust_volume", {
-                    "clip_index": clip_edit.clip_index,
-                    "volume": clip_edit.volume,
+            if clip.volume != 1.0:
+                await self.controller.execute_tool("adjust_volume", {
+                    "clip_index": clip.clip_index,
+                    "volume": clip.volume,
                 })
 
-            if clip_edit.filter_name:
-                await self.capcut.execute_tool("apply_filter", {
-                    "filter_name": clip_edit.filter_name,
-                    "intensity": clip_edit.filter_intensity,
-                    "apply_to": "clip",
-                    "clip_index": clip_edit.clip_index,
+            if clip.filter_name:
+                await self.controller.execute_tool("apply_filter", {
+                    "filter_name": clip.filter_name,
+                    "intensity": clip.filter_intensity,
                 })
 
-        # Transitions
-        for t in plan.transitions:
-            self._log(f"Adding {t.transition_type} transition after clip {t.after_clip_index}")
-            await self.capcut.execute_tool("add_transition", {
-                "clip_index": t.after_clip_index,
-                "transition_type": t.transition_type,
-                "duration_seconds": t.duration_seconds,
+            for effect in clip.effects:
+                if effect == "ken_burns":
+                    await self.controller.execute_tool("apply_ken_burns", {"clip_index": clip.clip_index})
+                elif effect not in ("none", ""):
+                    await self.controller.execute_tool("add_effect", {"effect_name": effect})
+
+        # 4. Beat-synced cuts
+        if plan.beat_cut_timestamps and cfg.enable_beat_sync:
+            self._log(f"Syncing {len(plan.beat_cut_timestamps)} cuts to the beat...")
+            await self.controller.execute_tool("add_beat_sync_cuts", {
+                "beat_timestamps": plan.beat_cut_timestamps[:15],  # Cap at 15 cuts
             })
 
-        # Text overlays
-        for overlay in plan.text_overlays:
-            self._log(f"Adding text: \"{overlay.text}\"")
-            await self.capcut.execute_tool("add_text", {
-                "text": overlay.text,
-                "position": overlay.position,
-                "start_seconds": overlay.start_seconds,
-                "duration_seconds": overlay.duration_seconds,
-                "font_size": overlay.font_size,
-                "color": overlay.color,
-            })
+        # 5. Color grade / vignette / grain / light leak
+        if plan.color_grade:
+            self._log(f"Applying {plan.color_grade} color grade...")
+            await self.controller.execute_tool("apply_lut", {"lut_style": plan.color_grade})
 
-        # Music
+        if plan.add_vignette:
+            await self.controller.execute_tool("add_vignette", {"intensity": 0.4})
+
+        if plan.add_film_grain:
+            await self.controller.execute_tool("add_film_grain", {"intensity": 0.25})
+
+        if plan.add_light_leak:
+            await self.controller.execute_tool("add_light_leak", {})
+
+        # 6. Music
         if plan.music_query:
-            self._log(f"Adding music: \"{plan.music_query}\"")
-            await self.capcut.execute_tool("add_music", {
+            self._log(f"Adding music: {plan.music_query}")
+            await self.controller.execute_tool("add_music", {
                 "query_or_path": plan.music_query,
-                "source": "library",
                 "volume": plan.music_volume,
-                "fade_in": True,
-                "fade_out": True,
+            })
+            await self.controller.execute_tool("duck_audio", {"duck_level": 0.3})
+
+        # 7. Text overlays
+        for layer in plan.text_layers:
+            self._log(f"Adding text: \"{layer.text}\"")
+            await self.controller.execute_tool("add_text", {
+                "text": layer.text,
+                "position": layer.position,
+                "start_seconds": layer.start_seconds,
+                "duration_seconds": layer.duration_seconds,
+                "font_size": layer.font_size,
+                "color": layer.color,
+                "animated": layer.animated,
+                "style": layer.style,
             })
 
-        # Aspect ratio
-        await self.capcut.execute_tool("crop_video", {"aspect_ratio": plan.aspect_ratio})
+        # 8. Auto captions
+        if plan.use_auto_captions:
+            self._log("Generating auto-captions...")
+            await self.controller.execute_tool("add_auto_captions", {})
 
-        # Export
+        # 9. Export
         self._log(f"Exporting at {plan.export_resolution} {plan.export_fps}fps...")
-        await self.capcut.execute_tool("export_video", {
+        await self.controller.execute_tool("export_video", {
             "resolution": plan.export_resolution,
             "fps": plan.export_fps,
             "format": "mp4",
         })
 
     # ------------------------------------------------------------------
-    # JSON → EditPlan
+    # Plan parsing
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_plan(data: dict[str, Any]) -> EditPlan:
+    def _parse_plan(data: dict) -> EditPlan:
         clips = [
             ClipEdit(
                 source_path=c["source_path"],
@@ -335,39 +449,43 @@ class JarvisDirector:
                 trim_start=c.get("trim_start", 0.0),
                 trim_end=c.get("trim_end"),
                 speed_multiplier=c.get("speed_multiplier", 1.0),
+                speed_ramp=c.get("speed_ramp"),
                 volume=c.get("volume", 1.0),
                 filter_name=c.get("filter_name"),
                 filter_intensity=c.get("filter_intensity", 0.7),
+                effects=c.get("effects", []),
+                stabilize=c.get("stabilize", False),
+                auto_enhance=c.get("auto_enhance", False),
             )
             for i, c in enumerate(data.get("clips", []))
         ]
-        transitions = [
-            TransitionPlan(
-                after_clip_index=t["after_clip_index"],
-                transition_type=t.get("transition_type", "fade"),
-                duration_seconds=t.get("duration_seconds", 0.5),
+        text_layers = [
+            TextLayer(
+                text=t["text"],
+                position=t.get("position", "bottom"),
+                start_seconds=t.get("start_seconds", 0),
+                duration_seconds=t.get("duration_seconds", 3),
+                font_size=t.get("font_size", "medium"),
+                color=t.get("color", "white"),
+                animated=t.get("animated", False),
+                style=t.get("style", "clean"),
             )
-            for t in data.get("transitions", [])
-        ]
-        overlays = [
-            TextOverlay(
-                text=o["text"],
-                position=o.get("position", "bottom"),
-                start_seconds=o.get("start_seconds", 0),
-                duration_seconds=o.get("duration_seconds", 3),
-                font_size=o.get("font_size", "medium"),
-                color=o.get("color", "white"),
-            )
-            for o in data.get("text_overlays", [])
+            for t in data.get("text_layers", [])
         ]
         return EditPlan(
             project_name=data.get("project_name", "Jarvis Edit"),
-            aspect_ratio=data.get("aspect_ratio", "16:9"),
+            aspect_ratio=data.get("aspect_ratio", "9:16"),
+            template_name=data.get("template_name", ""),
             clips=clips,
-            transitions=transitions,
-            text_overlays=overlays,
+            beat_cut_timestamps=data.get("beat_cut_timestamps", []),
+            text_layers=text_layers,
+            use_auto_captions=data.get("use_auto_captions", False),
             music_query=data.get("music_query"),
             music_volume=data.get("music_volume", 0.4),
+            color_grade=data.get("color_grade", "cinematic"),
+            add_vignette=data.get("add_vignette", True),
+            add_film_grain=data.get("add_film_grain", False),
+            add_light_leak=data.get("add_light_leak", False),
             export_resolution=data.get("export_resolution", "1080p"),
             export_fps=data.get("export_fps", 30),
             director_notes=data.get("director_notes", ""),
