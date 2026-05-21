@@ -36,6 +36,9 @@ class BrowserManager:
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
                 "--window-size=1920,1080",
+                "--ignore-certificate-errors",
+                "--ignore-ssl-errors",
+                "--disable-web-security",
             ],
         )
 
@@ -48,6 +51,7 @@ class BrowserManager:
             ),
             locale="en-US",
             timezone_id="America/New_York",
+            ignore_https_errors=True,
         )
 
         # Apply stealth scripts to mask automation fingerprints

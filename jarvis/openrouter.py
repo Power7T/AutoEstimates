@@ -23,10 +23,13 @@ OPENROUTER_BASE = "https://openrouter.ai/api/v1"
 
 class OpenRouterClient:
     def __init__(self):
-        self._client = OpenAI(
-            api_key=cfg.openrouter_api_key,
-            base_url=OPENROUTER_BASE,
-        )
+        self._client: OpenAI | None = None
+
+    def _get_client(self) -> OpenAI:
+        if self._client is None:
+            api_key = cfg.openrouter_api_key or "placeholder"
+            self._client = OpenAI(api_key=api_key, base_url=OPENROUTER_BASE)
+        return self._client
 
     # ------------------------------------------------------------------
     # Text completion
@@ -50,7 +53,7 @@ class OpenRouterClient:
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
 
-        resp = self._client.chat.completions.create(**kwargs)
+        resp = self._get_client().chat.completions.create(**kwargs)
         return resp.choices[0].message.content.strip()
 
     # ------------------------------------------------------------------
@@ -79,7 +82,7 @@ class OpenRouterClient:
                 "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
             })
 
-        resp = self._client.chat.completions.create(
+        resp = self._get_client().chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": content}],
             max_tokens=max_tokens,
