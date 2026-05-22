@@ -38,6 +38,7 @@ from jarvis.vision_controller import VisionController
 from jarvis.director import JarvisDirector
 from jarvis.ai_brain import JarvisAssistant
 from jarvis.taste_learner import TasteLearner
+from jarvis.adapters import get_adapter, ADAPTERS
 
 load_dotenv()
 console = Console()
@@ -189,6 +190,10 @@ async def main():
     parser.add_argument("--music", metavar="FILE", help="Custom music file to use.")
     parser.add_argument("--headless", action="store_true", help="Run browser in background.")
     parser.add_argument("--rate", action="store_true", help="View/update your taste profile.")
+    available_sw = [k for k, v in ADAPTERS.items() if v is not None] + ["capcut"]
+    parser.add_argument("--software", default="capcut",
+                        choices=available_sw,
+                        help=f"Editing software to use. Options: {', '.join(available_sw)}")
     args = parser.parse_args()
 
     # Rating mode — no browser needed
@@ -207,12 +212,39 @@ async def main():
     if args.headless:
         cfg.headless = True
 
-    # Start browser
+    software = args.software.lower()
+
+    # ----------------------------------------------------------------
+    # Non-CapCut adapters — no browser needed
+    # ----------------------------------------------------------------
+    if software != "capcut":
+        console.print(f"[dim]Starting {software} adapter...[/dim]")
+        try:
+            adapter = get_adapter(software)
+            await adapter.start()
+        except Exception as e:
+            console.print(f"[red]Could not start {software}:[/red] {e}")
+            sys.exit(1)
+
+        console.print(f"[green]{software.title()} ready.[/green]\n")
+
+        try:
+            if args.director:
+                await run_director(args, adapter)
+            else:
+                console.print(f"[yellow]Assistant Mode is optimised for CapCut.\n"
+                              f"For {software}, use Director Mode: --director your_clips[/yellow]")
+        finally:
+            await adapter.stop()
+        return
+
+    # ----------------------------------------------------------------
+    # CapCut — browser-based
+    # ----------------------------------------------------------------
     console.print("[dim]Starting stealth browser...[/dim]")
     browser = BrowserManager(headless=cfg.headless)
     page = await browser.start()
 
-    # Login
     console.print("[dim]Connecting to CapCut...[/dim]")
     logged_in = await browser.ensure_logged_in(
         email=cfg.capcut_email,

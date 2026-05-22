@@ -8,8 +8,11 @@ Pipeline:
   4. Load user taste profile
   5. Select best viral template for this content
   6. Claude plans the complete edit using all context
-  7. Execute every step in CapCut via vision-based controller
+  7. Execute every step in the chosen software (CapCut, DaVinci, Premiere, FCP, FFmpeg)
   8. Ask user to rate → update taste profile
+
+The Director is software-agnostic — it works with any adapter that
+implements BaseAdapter or the VisionController (for CapCut).
 """
 
 import json
@@ -22,7 +25,6 @@ from .audio_analyzer import analyze_audio, select_beat_cut_points, AudioAnalysis
 from .templates import EditingTemplate, select_template, TEMPLATES
 from .trends import get_current_trends
 from .taste_learner import TasteLearner
-from .vision_controller import VisionController
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +179,10 @@ Return JSON matching exactly this schema:
 class JarvisDirector:
     """Fully autonomous video editor — analyzes, plans, and executes."""
 
-    def __init__(self, controller: VisionController, console=None):
+    def __init__(self, controller, console=None):
+        """
+        controller: VisionController (CapCut) or BaseAdapter (DaVinci, Premiere, FCP, FFmpeg)
+        """
         self.controller = controller
         self.console = console
         self.video_analyzer = VideoAnalyzer()
