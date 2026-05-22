@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Jarvis — Viral Video Editor</title>
+  <style>
+    /* ------------------------------------------------------------------ */
+    /* Reset & base                                                         */
+    /* ------------------------------------------------------------------ */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:        #0a0a0a;
+      --surface:   #141414;
+      --border:    #222;
+      --accent:    #00ff88;
+      --accent-dim:#00cc6a;
+      --text:      #e8e8e8;
+      --muted:     #666;
+      --error:     #ff4455;
+      --warn:      #ffaa00;
+      --radius:    10px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ------------------------------------------------------------------ */
+    /* Layout                                                               */
+    /* ------------------------------------------------------------------ */
+    .page {
+      max-width: 820px;
+      margin: 0 auto;
+      padding: 2rem 1.25rem 4rem;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Header                                                               */
+    /* ------------------------------------------------------------------ */
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 2.5rem;
+    }
+
+    .logo {
+      font-size: 1.75rem;
+      font-weight: 800;
+      letter-spacing: -1px;
+    }
+
+    .logo span { color: var(--accent); }
+
+    .tagline {
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-top: 0.1rem;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Card                                                                 */
+    /* ------------------------------------------------------------------ */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.75rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .card-title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 1.25rem;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Drop zone                                                            */
+    /* ------------------------------------------------------------------ */
+    #drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 3rem 2rem;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      position: relative;
+    }
+
+    #drop-zone.drag-over {
+      border-color: var(--accent);
+      background: rgba(0, 255, 136, 0.04);
+    }
+
+    #drop-zone .icon {
+      font-size: 2.5rem;
+      margin-bottom: 0.75rem;
+      display: block;
+    }
+
+    #drop-zone .hint {
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin-top: 0.4rem;
+    }
+
+    #drop-zone .file-name {
+      margin-top: 1rem;
+      font-size: 0.9rem;
+      color: var(--accent);
+      font-weight: 600;
+      display: none;
+    }
+
+    #file-input {
+      position: absolute;
+      inset: 0;
+      opacity: 0;
+      cursor: pointer;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Options grid                                                         */
+    /* ------------------------------------------------------------------ */
+    .options-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1rem;
+    }
+
+    .field label {
+      display: block;
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+    }
+
+    .field select,
+    .field input[type="number"] {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 0.55rem 0.75rem;
+      font-size: 0.9rem;
+      appearance: none;
+      -webkit-appearance: none;
+      cursor: pointer;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    .field select:focus,
+    .field input[type="number"]:focus {
+      border-color: var(--accent);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Submit button                                                        */
+    /* ------------------------------------------------------------------ */
+    #submit-btn {
+      display: block;
+      width: 100%;
+      padding: 0.9rem;
+      margin-top: 1.5rem;
+      background: var(--accent);
+      color: #000;
+      font-size: 1rem;
+      font-weight: 800;
+      border: none;
+      border-radius: var(--radius);
+      cursor: pointer;
+      letter-spacing: 0.03em;
+      transition: background 0.15s, transform 0.1s;
+    }
+
+    #submit-btn:hover:not(:disabled) { background: var(--accent-dim); }
+    #submit-btn:active:not(:disabled) { transform: scale(0.99); }
+    #submit-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* ------------------------------------------------------------------ */
+    /* Progress section                                                     */
+    /* ------------------------------------------------------------------ */
+    #progress-section { display: none; }
+
+    .progress-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.6rem;
+    }
+
+    #step-label {
+      font-size: 0.9rem;
+      color: var(--text);
+    }
+
+    #pct-label {
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .progress-track {
+      height: 8px;
+      background: var(--border);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+
+    #progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--accent), #00ddff);
+      border-radius: 99px;
+      transition: width 0.4s ease;
+    }
+
+    .progress-track.error #progress-bar { background: var(--error); }
+
+    #error-msg {
+      margin-top: 0.75rem;
+      font-size: 0.85rem;
+      color: var(--error);
+      display: none;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Results section                                                      */
+    /* ------------------------------------------------------------------ */
+    #results-section { display: none; }
+
+    #clips-list { display: flex; flex-direction: column; gap: 1rem; }
+
+    .clip-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.1rem 1.25rem;
+      display: flex;
+      align-items: center;
+      gap: 1.25rem;
+      transition: border-color 0.15s;
+    }
+
+    .clip-card:hover { border-color: #333; }
+
+    .clip-rank {
+      font-size: 1.5rem;
+      font-weight: 900;
+      color: var(--accent);
+      min-width: 2rem;
+      text-align: center;
+    }
+
+    .clip-info { flex: 1; min-width: 0; }
+
+    .clip-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 0.2rem;
+    }
+
+    .clip-meta {
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+
+    .clip-meta span { margin-right: 0.75rem; }
+
+    .clip-verdict {
+      font-size: 0.8rem;
+      color: #aaa;
+      margin-top: 0.25rem;
+      font-style: italic;
+    }
+
+    .grade-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 6px;
+      font-weight: 900;
+      font-size: 1rem;
+    }
+
+    .grade-S { background: rgba(0,255,136,0.15); color: var(--accent); }
+    .grade-A { background: rgba(0,200,255,0.12); color: #00c8ff; }
+    .grade-B { background: rgba(100,200,80,0.12); color: #7dcf60; }
+    .grade-C { background: rgba(255,170,0,0.12);  color: var(--warn); }
+    .grade-D { background: rgba(255,60,60,0.10);  color: var(--error); }
+
+    .dl-btn {
+      flex-shrink: 0;
+      padding: 0.45rem 1rem;
+      background: transparent;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      color: var(--accent);
+      font-size: 0.82rem;
+      font-weight: 700;
+      cursor: pointer;
+      text-decoration: none;
+      transition: background 0.15s, color 0.15s;
+      white-space: nowrap;
+    }
+
+    .dl-btn:hover {
+      background: var(--accent);
+      color: #000;
+      text-decoration: none;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Jobs list                                                            */
+    /* ------------------------------------------------------------------ */
+    #jobs-link {
+      margin-top: 2rem;
+      text-align: center;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Responsive                                                           */
+    /* ------------------------------------------------------------------ */
+    @media (max-width: 560px) {
+      .clip-card { flex-wrap: wrap; }
+      .clip-rank { min-width: auto; }
+    }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <header class="header">
+    <div>
+      <div class="logo">J<span>arvis</span></div>
+      <div class="tagline">AI-powered viral short-form video editor</div>
+    </div>
+  </header>
+
+  <!-- Upload card -->
+  <div class="card">
+    <div class="card-title">Upload Video</div>
+
+    <div id="drop-zone">
+      <input type="file" id="file-input" accept="video/*" />
+      <span class="icon">&#128249;</span>
+      <div>Drag &amp; drop your video here</div>
+      <div class="hint">or click to browse — MP4, MOV, MKV supported</div>
+      <div class="file-name" id="file-name-label"></div>
+    </div>
+  </div>
+
+  <!-- Options card -->
+  <div class="card">
+    <div class="card-title">Options</div>
+    <div class="options-grid">
+
+      <div class="field">
+        <label for="n-clips">Clips to Analyse</label>
+        <select id="n-clips" name="n_clips">
+          <option value="5">5 clips</option>
+          <option value="10" selected>10 clips</option>
+          <option value="15">15 clips</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="export-n">Top N to Export</label>
+        <select id="export-n" name="export_n">
+          <option value="3">Top 3</option>
+          <option value="5" selected>Top 5</option>
+          <option value="10">Top 10</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="style">Caption Style</label>
+        <select id="style" name="style">
+          <option value="bold" selected>Bold</option>
+          <option value="clean">Clean</option>
+          <option value="kinetic">Kinetic</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label for="platform">Platform</label>
+        <select id="platform" name="platform">
+          <option value="tiktok" selected>TikTok</option>
+          <option value="instagram">Instagram Reels</option>
+          <option value="youtube_shorts">YouTube Shorts</option>
+        </select>
+      </div>
+
+    </div>
+
+    <button id="submit-btn" disabled>Select a video to start</button>
+  </div>
+
+  <!-- Progress card -->
+  <div class="card" id="progress-section">
+    <div class="card-title">Processing</div>
+    <div class="progress-header">
+      <span id="step-label">Starting...</span>
+      <span id="pct-label">0%</span>
+    </div>
+    <div class="progress-track" id="progress-track">
+      <div id="progress-bar"></div>
+    </div>
+    <div id="error-msg"></div>
+  </div>
+
+  <!-- Results card -->
+  <div class="card" id="results-section">
+    <div class="card-title">Results</div>
+    <div id="clips-list"></div>
+  </div>
+
+  <!-- Jobs link -->
+  <div id="jobs-link">
+    <a href="/jobs" target="_blank">View all jobs (JSON)</a>
+  </div>
+
+</div><!-- .page -->
+
+<script>
+  /* ------------------------------------------------------------------ */
+  /* File selection + drag & drop                                         */
+  /* ------------------------------------------------------------------ */
+  const dropZone     = document.getElementById('drop-zone');
+  const fileInput    = document.getElementById('file-input');
+  const fileLabel    = document.getElementById('file-name-label');
+  const submitBtn    = document.getElementById('submit-btn');
+
+  let selectedFile = null;
+
+  function handleFile(file) {
+    if (!file) return;
+    selectedFile = file;
+    fileLabel.textContent = file.name;
+    fileLabel.style.display = 'block';
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Process Video';
+  }
+
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files.length) handleFile(fileInput.files[0]);
+  });
+
+  dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('drag-over');
+  });
+
+  dropZone.addEventListener('dragleave', () => {
+    dropZone.classList.remove('drag-over');
+  });
+
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file) {
+      // Sync back to file input so form works too
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      fileInput.files = dt.files;
+      handleFile(file);
+    }
+  });
+
+  /* ------------------------------------------------------------------ */
+  /* Submit                                                               */
+  /* ------------------------------------------------------------------ */
+  submitBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Uploading...';
+
+    const formData = new FormData();
+    formData.append('video',    selectedFile);
+    formData.append('n_clips',  document.getElementById('n-clips').value);
+    formData.append('export_n', document.getElementById('export-n').value);
+    formData.append('style',    document.getElementById('style').value);
+    formData.append('platform', document.getElementById('platform').value);
+
+    let jobId;
+    try {
+      const resp = await fetch('/process', { method: 'POST', body: formData });
+      if (!resp.ok) throw new Error(`Upload failed: ${resp.status}`);
+      const data = await resp.json();
+      jobId = data.job_id;
+    } catch (err) {
+      showError(err.message);
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Retry';
+      return;
+    }
+
+    // Show progress card
+    document.getElementById('progress-section').style.display = 'block';
+    document.getElementById('results-section').style.display = 'none';
+    document.getElementById('error-msg').style.display = 'none';
+    document.getElementById('progress-track').classList.remove('error');
+
+    pollStatus(jobId);
+  });
+
+  /* ------------------------------------------------------------------ */
+  /* Polling                                                              */
+  /* ------------------------------------------------------------------ */
+  function pollStatus(jobId) {
+    const intervalId = setInterval(async () => {
+      let data;
+      try {
+        const resp = await fetch(`/status/${jobId}`);
+        if (!resp.ok) throw new Error(`Status check failed: ${resp.status}`);
+        data = await resp.json();
+      } catch (err) {
+        clearInterval(intervalId);
+        showError(err.message);
+        return;
+      }
+
+      updateProgress(data.step, data.progress);
+
+      if (data.status === 'done') {
+        clearInterval(intervalId);
+        updateProgress('Done!', 100);
+        renderResults(data.clips, jobId);
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Process Another Video';
+      } else if (data.status === 'error') {
+        clearInterval(intervalId);
+        showError(data.error || 'An unknown error occurred.');
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Retry';
+      }
+    }, 2000);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Progress helpers                                                     */
+  /* ------------------------------------------------------------------ */
+  function updateProgress(step, pct) {
+    document.getElementById('step-label').textContent = step;
+    document.getElementById('pct-label').textContent  = `${pct}%`;
+    document.getElementById('progress-bar').style.width = `${pct}%`;
+  }
+
+  function showError(msg) {
+    const errEl = document.getElementById('error-msg');
+    errEl.textContent = 'Error: ' + msg;
+    errEl.style.display = 'block';
+    document.getElementById('progress-track').classList.add('error');
+    document.getElementById('step-label').textContent = 'Failed';
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Render results                                                       */
+  /* ------------------------------------------------------------------ */
+  function gradeClass(grade) {
+    const map = { S: 'grade-S', A: 'grade-A', B: 'grade-B', C: 'grade-C', D: 'grade-D' };
+    return map[grade] || 'grade-D';
+  }
+
+  function fmtDuration(secs) {
+    const m = Math.floor(secs / 60);
+    const s = Math.round(secs % 60);
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+
+  function renderResults(clips, jobId) {
+    if (!clips || clips.length === 0) return;
+
+    const section = document.getElementById('results-section');
+    const list    = document.getElementById('clips-list');
+
+    section.style.display = 'block';
+    list.innerHTML = '';
+
+    clips.forEach((clip) => {
+      const card = document.createElement('div');
+      card.className = 'clip-card';
+
+      const dlUrl = `/download/${jobId}/${encodeURIComponent(clip.filename)}`;
+
+      card.innerHTML = `
+        <div class="clip-rank">#${clip.rank}</div>
+        <div class="grade-badge ${gradeClass(clip.grade)}">${clip.grade}</div>
+        <div class="clip-info">
+          <div class="clip-title">${escHtml(clip.title)}</div>
+          <div class="clip-meta">
+            <span>Score: ${clip.score.toFixed(1)}</span>
+            <span>${fmtDuration(clip.duration)}</span>
+            <span>${escHtml(clip.best_platform || '')}</span>
+            <span>${escHtml(clip.predicted_views || '')}</span>
+          </div>
+          ${clip.verdict ? `<div class="clip-verdict">${escHtml(clip.verdict)}</div>` : ''}
+        </div>
+        <a class="dl-btn" href="${dlUrl}" download="${escHtml(clip.filename)}">Download</a>
+      `;
+
+      list.appendChild(card);
+    });
+  }
+
+  function escHtml(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+</script>
+</body>
+</html>
