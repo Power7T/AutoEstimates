@@ -1,332 +1,532 @@
 #!/usr/bin/env python3
 """
-Jarvis AI Video Editor — Setup Script
-======================================
-Checks all dependencies, prompts for API keys, and prepares the environment.
-
+setup.py — Jarvis Viral Video Editor — Onboarding Script
+---------------------------------------------------------
 Run once before first use:
+
     python setup.py
+
+What it does
+------------
+1. Checks Python version (>= 3.10 required).
+2. Checks for ffmpeg / ffprobe system binaries.
+3. Checks for required Python packages.
+4. Prompts for environment variables and writes (or updates) a .env file.
+5. Installs the Playwright Chromium browser if playwright is available.
+6. Creates required project directories.
+7. Prints a colour-coded summary and a final usage hint.
 """
 
+from __future__ import annotations
+
+import importlib
 import os
 import subprocess
 import sys
+from pathlib import Path
 
-# Try rich for colored output, fall back to plain print
+# ---------------------------------------------------------------------------
+# Rich — optional; graceful fallback to plain print
+# ---------------------------------------------------------------------------
+
 try:
     from rich.console import Console
     from rich.panel import Panel
     from rich.table import Table
-    console = Console()
-    def ok(msg):   console.print(f"  [bold green]✓[/bold green]  {msg}")
-    def warn(msg): console.print(f"  [bold yellow]![/bold yellow]  {msg}")
-    def err(msg):  console.print(f"  [bold red]✗[/bold red]  {msg}")
-    def info(msg): console.print(f"  [dim]→[/dim]  {msg}")
-    _RICH = True
+
+    _console = Console()
+
+    def _ok(msg: str)   -> None: _console.print(f"  [bold green]✓[/bold green]  {msg}")
+    def _warn(msg: str) -> None: _console.print(f"  [bold yellow]![/bold yellow]  {msg}")
+    def _err(msg: str)  -> None: _console.print(f"  [bold red]✗[/bold red]  {msg}")
+    def _info(msg: str) -> None: _console.print(f"  [dim]→[/dim]  {msg}")
+
+    def _header(msg: str) -> None:
+        _console.print(f"\n[bold white]{msg}[/bold white]")
+
+    _HAS_RICH = True
+
 except ImportError:
-    def ok(msg):   print(f"  [OK]   {msg}")
-    def warn(msg): print(f"  [WARN] {msg}")
-    def err(msg):  print(f"  [ERR]  {msg}")
-    def info(msg): print(f"  [...]  {msg}")
-    _RICH = False
+    _HAS_RICH  = False
+    _console   = None  # type: ignore[assignment]
+
+    def _ok(msg: str)     -> None: print(f"  [OK]   {msg}")   # type: ignore[misc]
+    def _warn(msg: str)   -> None: print(f"  [WARN] {msg}")   # type: ignore[misc]
+    def _err(msg: str)    -> None: print(f"  [ERR]  {msg}")   # type: ignore[misc]
+    def _info(msg: str)   -> None: print(f"         {msg}")   # type: ignore[misc]
+    def _header(msg: str) -> None: print(f"\n{msg}")          # type: ignore[misc]
 
 
 # ---------------------------------------------------------------------------
-# Checks
+# Project root (directory containing this file)
+# ---------------------------------------------------------------------------
+
+_ROOT = Path(__file__).parent.resolve()
+
+# ---------------------------------------------------------------------------
+# Required project directories (relative to project root)
+# ---------------------------------------------------------------------------
+
+_REQUIRED_DIRS: list[str] = [
+    "output/clips",
+    "data/cookies",
+    "data/taste_profiles",
+    "data/cache",
+]
+
+# ---------------------------------------------------------------------------
+# Required Python packages: (import_name, pip_install_name)
+# ---------------------------------------------------------------------------
+
+_REQUIRED_PACKAGES: list[tuple[str, str]] = [
+    ("openai",      "openai"),
+    ("whisper",     "openai-whisper"),
+    ("cv2",         "opencv-python"),
+    ("librosa",     "librosa"),
+    ("playwright",  "playwright"),
+    ("rich",        "rich"),
+    ("dotenv",      "python-dotenv"),
+]
+
+# ---------------------------------------------------------------------------
+# Environment variable definitions
+# ---------------------------------------------------------------------------
+
+_ENV_VARS: list[dict] = [
+    {
+        "key":      "OPENROUTER_API_KEY",
+        "label":    "OpenRouter API key",
+        "required": True,
+        "prompt":   "OpenRouter API key (https://openrouter.ai/keys): ",
+        "secret":   True,
+    },
+    {
+        "key":      "CAPCUT_EMAIL",
+        "label":    "CapCut email",
+        "required": False,
+        "prompt":   "CapCut account email (optional — press Enter to skip): ",
+        "secret":   False,
+    },
+    {
+        "key":      "CAPCUT_PASSWORD",
+        "label":    "CapCut password",
+        "required": False,
+        "prompt":   "CapCut account password (optional — press Enter to skip): ",
+        "secret":   True,
+    },
+    {
+        "key":      "PIXABAY_API_KEY",
+        "label":    "Pixabay API key",
+        "required": False,
+        "prompt":   "Pixabay API key for music matching (https://pixabay.com/api/docs/, optional): ",
+        "secret":   False,
+    },
+    {
+        "key":      "HUGGINGFACE_TOKEN",
+        "label":    "HuggingFace token",
+        "required": False,
+        "prompt":   "HuggingFace token for speaker diarisation (optional): ",
+        "secret":   True,
+    },
+]
+
+
+# ---------------------------------------------------------------------------
+# Check functions — each returns (ok: bool, message: str)
 # ---------------------------------------------------------------------------
 
 def check_python_version() -> tuple[bool, str]:
-    major, minor = sys.version_info[:2]
-    if major < 3 or (major == 3 and minor < 10):
-        return False, f"Python {major}.{minor} — need 3.10+"
-    return True, f"Python {major}.{minor}"
+    """Verify Python >= 3.10."""
+    major, minor, micro = sys.version_info[:3]
+    version_str = f"{major}.{minor}.{micro}"
+    if (major, minor) >= (3, 10):
+        return True, f"Python {version_str}"
+    return False, f"Python {version_str} — 3.10+ required"
 
 
 def check_ffmpeg() -> tuple[bool, str]:
+    """Check that ffmpeg is on PATH and executable."""
     try:
-        result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True)
-        line = result.stdout.splitlines()[0] if result.stdout else ""
-        version = line.split("version")[1].strip().split()[0] if "version" in line else "unknown"
-        return True, f"ffmpeg {version}"
+        result = subprocess.run(
+            ["ffmpeg", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            first_line = (result.stdout or "").splitlines()[0]
+            # Trim to a readable length
+            return True, first_line[:70]
+        return False, "ffmpeg returned a non-zero exit code"
     except FileNotFoundError:
-        return False, "ffmpeg not found — install: sudo apt install ffmpeg  OR  brew install ffmpeg"
+        return (
+            False,
+            "ffmpeg not found — install from https://ffmpeg.org/download.html  "
+            "or: sudo apt install ffmpeg / brew install ffmpeg",
+        )
+    except Exception as exc:
+        return False, f"ffmpeg check error: {exc}"
 
 
 def check_ffprobe() -> tuple[bool, str]:
+    """Check that ffprobe is on PATH (usually bundled with ffmpeg)."""
     try:
-        subprocess.run(["ffprobe", "-version"], capture_output=True, check=True)
-        return True, "ffprobe available"
-    except (FileNotFoundError, subprocess.CalledProcessError):
-        return False, "ffprobe not found (usually installed with ffmpeg)"
+        result = subprocess.run(
+            ["ffprobe", "-version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            first_line = (result.stdout or "").splitlines()[0]
+            return True, first_line[:70]
+        return False, "ffprobe returned a non-zero exit code"
+    except FileNotFoundError:
+        return False, "ffprobe not found (usually bundled with ffmpeg)"
+    except Exception as exc:
+        return False, f"ffprobe check error: {exc}"
 
 
-def check_package(package: str, import_name: str = None) -> tuple[bool, str]:
-    name = import_name or package
+def check_package(import_name: str, pip_name: str) -> tuple[bool, str]:
+    """Try to import *import_name* and report its version."""
     try:
-        __import__(name)
-        return True, f"{package} installed"
+        mod     = importlib.import_module(import_name)
+        version = getattr(mod, "__version__", "?")
+        return True, f"{pip_name} {version}"
     except ImportError:
-        return False, f"{package} not installed — run: pip install {package}"
-
-
-def check_env_file() -> tuple[bool, str]:
-    if os.path.exists(".env"):
-        return True, ".env file exists"
-    return False, ".env file missing — will create"
-
-
-def check_openrouter_key() -> tuple[bool, str]:
-    key = os.environ.get("OPENROUTER_API_KEY", "")
-    if key and key != "your_key_here":
-        return True, "OPENROUTER_API_KEY set"
-    # Try reading from .env
-    if os.path.exists(".env"):
-        with open(".env") as f:
-            for line in f:
-                if line.startswith("OPENROUTER_API_KEY="):
-                    val = line.split("=", 1)[1].strip()
-                    if val and val != "your_key_here":
-                        return True, "OPENROUTER_API_KEY set in .env"
-    return False, "OPENROUTER_API_KEY not set (required)"
+        return False, f"{pip_name} not installed — run: pip install {pip_name}"
 
 
 # ---------------------------------------------------------------------------
-# Prompts
+# .env loading and writing
 # ---------------------------------------------------------------------------
 
-def prompt(label: str, default: str = "", secret: bool = False) -> str:
-    suffix = f" [{default}]" if default and not secret else ""
+def _load_env_file() -> dict[str, str]:
+    """
+    Parse the project-root .env file and return a dict of key → value.
+    Also includes any matching values already set in the process environment.
+    """
+    env_path = _ROOT / ".env"
+    values: dict[str, str] = {}
+
+    if env_path.exists():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            values[key.strip()] = val.strip().strip('"').strip("'")
+
+    # Process environment takes precedence / fills gaps
+    for var in _ENV_VARS:
+        k = var["key"]
+        if k not in values and os.environ.get(k):
+            values[k] = os.environ[k]
+
+    return values
+
+
+def _missing_required_keys(current: dict[str, str]) -> list[str]:
+    return [
+        v["key"]
+        for v in _ENV_VARS
+        if v["required"] and not current.get(v["key"])
+    ]
+
+
+def _prompt_value(prompt_text: str, secret: bool) -> str:
+    """Prompt for a value, hiding input if *secret* is True."""
     try:
         if secret:
             import getpass
-            val = getpass.getpass(f"  {label}{suffix}: ").strip()
-        else:
-            val = input(f"  {label}{suffix}: ").strip()
+            return getpass.getpass(f"  {prompt_text}").strip()
+        return input(f"  {prompt_text}").strip()
     except (KeyboardInterrupt, EOFError):
-        return default
-    return val if val else default
+        print()
+        return ""
 
 
-def read_env() -> dict:
-    env = {}
-    if os.path.exists(".env"):
-        with open(".env") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    k, v = line.split("=", 1)
-                    env[k.strip()] = v.strip()
-    return env
+def prompt_for_env_vars(existing: dict[str, str]) -> dict[str, str]:
+    """
+    Interactively prompt for any env var that is not already set.
+    Returns the merged dict (old values + newly entered values).
+    """
+    collected: dict[str, str] = dict(existing)
+    print()
 
+    for var in _ENV_VARS:
+        key    = var["key"]
+        secret = var["secret"]
 
-def write_env(env: dict):
-    lines = []
-    # Preserve comments from template if it exists
-    if os.path.exists(".env.example"):
-        with open(".env.example") as f:
-            template = f.read()
-    else:
-        template = ""
+        if collected.get(key):
+            display = "****" if secret else collected[key][:40]
+            _ok(f"{key} already set  ({display})")
+            continue
 
-    for k, v in env.items():
-        lines.append(f"{k}={v}")
+        value = _prompt_value(var["prompt"], secret)
 
-    with open(".env", "w") as f:
-        if template:
-            # Write template with values filled in
-            result = template
-            for k, v in env.items():
-                import re
-                result = re.sub(rf"^{k}=.*$", f"{k}={v}", result, flags=re.MULTILINE)
-            f.write(result)
+        if value:
+            collected[key] = value
+            _ok(f"{key} saved.")
+        elif var["required"]:
+            _err(f"{key} is required — Jarvis cannot start without it.")
         else:
-            f.write("\n".join(lines) + "\n")
+            _warn(f"{key} skipped (optional).")
+
+    return collected
+
+
+def write_env_file(values: dict[str, str]) -> None:
+    """
+    Write all env vars to ``<project_root>/.env``.
+    Empty/unset optional values are commented out.
+    """
+    env_path = _ROOT / ".env"
+    lines = [
+        "# Jarvis configuration — generated by setup.py",
+        "# Edit this file or re-run setup.py to update values.",
+        "",
+    ]
+
+    for var in _ENV_VARS:
+        key   = var["key"]
+        label = var["label"]
+        value = values.get(key, "")
+        lines.append(f"# {label}")
+        if value:
+            lines.append(f'{key}="{value}"')
+        else:
+            lines.append(f"# {key}=")
+        lines.append("")
+
+    env_path.write_text("\n".join(lines), encoding="utf-8")
+    _ok(f".env written → {env_path}")
+
+
+# ---------------------------------------------------------------------------
+# Playwright
+# ---------------------------------------------------------------------------
+
+def install_playwright_chromium() -> tuple[bool, str]:
+    """Run ``playwright install chromium`` if playwright is importable."""
+    try:
+        importlib.import_module("playwright")
+    except ImportError:
+        return False, "playwright not installed — skipping browser install"
+
+    _info("Running: playwright install chromium …")
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            timeout=300,
+        )
+        if result.returncode == 0:
+            return True, "Playwright Chromium installed successfully"
+        return False, f"playwright install exited with code {result.returncode}"
+    except Exception as exc:
+        return False, f"playwright install failed: {exc}"
 
 
 # ---------------------------------------------------------------------------
 # Directories
 # ---------------------------------------------------------------------------
 
-REQUIRED_DIRS = [
-    "output/clips",
-    "data/cookies",
-    "data/taste_profiles",
-    "data/cache",
-    "data/uploads",
-]
-
-
-def create_directories():
-    for d in REQUIRED_DIRS:
-        os.makedirs(d, exist_ok=True)
-    ok(f"Created {len(REQUIRED_DIRS)} required directories")
+def create_directories() -> list[tuple[bool, str]]:
+    """Create all required project directories, return (ok, rel_path) pairs."""
+    results: list[tuple[bool, str]] = []
+    for rel_path in _REQUIRED_DIRS:
+        target = _ROOT / rel_path
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            results.append((True, str(target.relative_to(_ROOT))))
+        except Exception as exc:
+            results.append((False, f"{rel_path}: {exc}"))
+    return results
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Summary table
 # ---------------------------------------------------------------------------
 
-def run_setup():
-    print()
-    if _RICH:
-        from rich.text import Text
-        t = Text("  Jarvis AI Video Editor — Setup", style="bold blue")
-        console.print(Panel(t, border_style="blue"))
-    else:
-        print("=" * 50)
-        print("  Jarvis AI Video Editor — Setup")
-        print("=" * 50)
-    print()
-
-    # ---- System checks ----
-    print("Checking system requirements...")
-    print()
-
-    all_ok = True
-
-    checks = [
-        check_python_version(),
-        check_ffmpeg(),
-        check_ffprobe(),
-    ]
-    for passed, msg in checks:
-        (ok if passed else err)(msg)
-        if not passed:
-            all_ok = False
-
-    print()
-    print("Checking Python packages...")
-    print()
-
-    packages = [
-        ("openai", None),
-        ("rich", None),
-        ("dotenv", "dotenv"),
-        ("cv2", "cv2"),
-        ("librosa", None),
-        ("whisper", "whisper"),
-        ("numpy", "numpy"),
-        ("playwright", "playwright"),
-        ("fastapi", None),
-        ("uvicorn", None),
-        ("jinja2", "jinja2"),
-    ]
-
-    missing_packages = []
-    for pkg, imp in packages:
-        passed, msg = check_package(pkg, imp)
-        (ok if passed else warn)(msg)
-        if not passed:
-            missing_packages.append(pkg)
-
-    if missing_packages:
-        print()
-        info(f"Install missing packages: pip install {' '.join(missing_packages)}")
-        info("Or install everything: pip install -r requirements.txt")
-
-    # ---- API keys ----
-    print()
-    print("Configuring API keys...")
-    print()
-
-    env = read_env()
-    env_changed = False
-
-    # OpenRouter (required)
-    key_ok, _ = check_openrouter_key()
-    if not key_ok:
-        warn("OPENROUTER_API_KEY is required for AI features")
-        info("Get your key at: https://openrouter.ai/keys")
-        key = prompt("OPENROUTER_API_KEY", secret=True)
-        if key:
-            env["OPENROUTER_API_KEY"] = key
-            env_changed = True
-            ok("OPENROUTER_API_KEY saved")
-        else:
-            err("OPENROUTER_API_KEY not set — AI features will not work")
-            all_ok = False
-    else:
-        ok("OPENROUTER_API_KEY already set")
-
-    # CapCut (optional)
-    if not env.get("CAPCUT_EMAIL"):
-        info("CapCut email/password (optional — only needed for CapCut mode)")
-        email = prompt("CAPCUT_EMAIL (Enter to skip)", "")
-        if email:
-            env["CAPCUT_EMAIL"] = email
-            password = prompt("CAPCUT_PASSWORD", secret=True)
-            if password:
-                env["CAPCUT_PASSWORD"] = password
-            env_changed = True
-    else:
-        ok("CapCut credentials already set")
-
-    # Pixabay (optional)
-    if not env.get("PIXABAY_API_KEY"):
-        info("Pixabay API key (optional — enables auto music matching)")
-        info("Free key at: https://pixabay.com/api/docs/")
-        key = prompt("PIXABAY_API_KEY (Enter to skip)", "")
-        if key:
-            env["PIXABAY_API_KEY"] = key
-            env_changed = True
-
-    # HuggingFace (optional)
-    if not env.get("HUGGINGFACE_TOKEN"):
-        info("HuggingFace token (optional — enables pro speaker diarization)")
-        key = prompt("HUGGINGFACE_TOKEN (Enter to skip)", "")
-        if key:
-            env["HUGGINGFACE_TOKEN"] = key
-            env_changed = True
-
-    if env_changed:
-        write_env(env)
-        ok(".env file updated")
-
-    # ---- Playwright ----
-    print()
-    try:
-        import playwright
-        info("Installing Playwright browsers...")
-        result = subprocess.run(
-            ["playwright", "install", "chromium"],
-            capture_output=True, text=True,
+def _print_summary(rows: list[tuple[bool, str, str]]) -> None:
+    """Print a colour-coded summary of all checks."""
+    if _HAS_RICH:
+        table = Table(
+            title="Jarvis Setup Summary",
+            show_header=True,
+            header_style="bold magenta",
+            border_style="dim",
         )
-        if result.returncode == 0:
-            ok("Playwright chromium installed")
-        else:
-            warn(f"Playwright install: {result.stderr[:100]}")
-    except ImportError:
-        warn("Playwright not installed — CapCut mode unavailable")
+        table.add_column("Status",   width=8,  justify="center")
+        table.add_column("Category", width=22)
+        table.add_column("Detail")
 
-    # ---- Directories ----
-    print()
-    create_directories()
+        for ok_flag, category, message in rows:
+            if ok_flag:
+                status_col  = "[bold green] OK [/bold green]"
+                message_col = f"[green]{message}[/green]"
+            else:
+                status_col  = "[bold red]FAIL[/bold red]"
+                message_col = f"[red]{message}[/red]"
+            table.add_row(status_col, category, message_col)
 
-    # ---- Summary ----
-    print()
-    if all_ok:
-        if _RICH:
-            console.print(Panel(
-                "[bold green]Setup complete![/bold green]\n\n"
-                "Run: [bold]python main.py --opus your_video.mp4[/bold]\n"
-                "Web UI: [bold]python -m uvicorn jarvis.web.app:app --reload[/bold]",
-                border_style="green"
-            ))
-        else:
-            print("Setup complete!")
-            print("Run: python main.py --opus your_video.mp4")
-            print("Web UI: python -m uvicorn jarvis.web.app:app --reload")
+        _console.print()
+        _console.print(table)
     else:
-        if _RICH:
-            console.print(Panel(
-                "[bold yellow]Setup complete with warnings.[/bold yellow]\n"
-                "Fix the items marked [red]✗[/red] above before running Jarvis.",
-                border_style="yellow"
-            ))
-        else:
-            print("Setup complete with warnings. Fix errors above before running.")
-    print()
+        print()
+        print("=" * 68)
+        print("  Jarvis Setup Summary")
+        print("=" * 68)
+        for ok_flag, category, message in rows:
+            flag = " OK " if ok_flag else "FAIL"
+            print(f"  [{flag}]  {category:<22} {message}")
+        print("=" * 68)
 
+
+# ---------------------------------------------------------------------------
+# Main setup runner
+# ---------------------------------------------------------------------------
+
+def run_setup() -> None:
+    """
+    Full onboarding flow:
+      1. Python version check
+      2. System binary checks (ffmpeg, ffprobe)
+      3. Python package checks
+      4. .env / environment variable prompts
+      5. Playwright Chromium install
+      6. Project directory creation
+      7. Colour-coded summary + final usage message
+    """
+    summary: list[tuple[bool, str, str]] = []
+    hard_errors = False
+
+    # ------------------------------------------------------------------
+    _header("Jarvis — Viral Video Editor  ·  Setup")
+    _header("━" * 50)
+
+    # ---- 1. Python version ------------------------------------------------
+    _header("[ 1 / 6 ]  Python version")
+    ok_flag, msg = check_python_version()
+    (ok_flag and _ok or _err)(msg)
+    summary.append((ok_flag, "Python", msg))
+    if not ok_flag:
+        hard_errors = True
+
+    # ---- 2. System tools --------------------------------------------------
+    _header("[ 2 / 6 ]  System tools  (ffmpeg, ffprobe)")
+    for check_fn, label in [(check_ffmpeg, "ffmpeg"), (check_ffprobe, "ffprobe")]:
+        ok_flag, msg = check_fn()
+        (ok_flag and _ok or _err)(msg)
+        summary.append((ok_flag, label, msg))
+        if not ok_flag:
+            hard_errors = True
+
+    # ---- 3. Python packages -----------------------------------------------
+    _header("[ 3 / 6 ]  Python packages")
+    for import_name, pip_name in _REQUIRED_PACKAGES:
+        ok_flag, msg = check_package(import_name, pip_name)
+        # Missing packages are warnings, not hard errors (user may install later)
+        (ok_flag and _ok or _warn)(msg)
+        summary.append((ok_flag, "package", msg))
+
+    if not _HAS_RICH:
+        _warn("rich not installed — output will be plain text")
+        _info("Install it with: pip install rich")
+
+    # ---- 4. Environment variables -----------------------------------------
+    _header("[ 4 / 6 ]  Environment variables  (.env)")
+    current_values = _load_env_file()
+    missing        = _missing_required_keys(current_values)
+
+    if missing:
+        _warn(f"Missing required key(s): {', '.join(missing)}")
+        _info("Please enter the values below. Press Ctrl+C to skip (Jarvis may not work).")
+        all_values = prompt_for_env_vars(current_values)
+    else:
+        _ok("All required env vars are already set.")
+        # Still offer to fill in optional vars that are unset
+        unset_optional = [
+            v["key"] for v in _ENV_VARS
+            if not v["required"] and not current_values.get(v["key"])
+        ]
+        if unset_optional:
+            _info(
+                f"Optional vars not set: {', '.join(unset_optional)}"
+                " — run setup.py again to configure them."
+            )
+        all_values = current_values
+
+    write_env_file(all_values)
+
+    for var in _ENV_VARS:
+        key      = var["key"]
+        required = var["required"]
+        is_set   = bool(all_values.get(key))
+
+        if is_set:
+            summary.append((True, "env var", f"{key} — set"))
+        elif required:
+            summary.append((False, "env var", f"{key} — MISSING (required)"))
+            hard_errors = True
+        else:
+            summary.append((True, "env var", f"{key} — not set (optional)"))
+
+    # ---- 5. Playwright browser --------------------------------------------
+    _header("[ 5 / 6 ]  Playwright browser")
+    ok_flag, msg = install_playwright_chromium()
+    (ok_flag and _ok or _warn)(msg)
+    summary.append((ok_flag, "playwright", msg))
+
+    # ---- 6. Project directories -------------------------------------------
+    _header("[ 6 / 6 ]  Project directories")
+    dir_results = create_directories()
+    for ok_flag, rel_path in dir_results:
+        (ok_flag and _ok or _err)(rel_path)
+        summary.append((ok_flag, "directory", rel_path))
+        if not ok_flag:
+            hard_errors = True
+
+    # ---- Summary ----------------------------------------------------------
+    _print_summary(summary)
+
+    # ---- Final message ----------------------------------------------------
+    if hard_errors:
+        if _HAS_RICH:
+            _console.print(
+                Panel(
+                    "[bold red]Setup completed with errors.[/bold red]\n\n"
+                    "Fix the items marked [bold red]FAIL[/bold red] above, "
+                    "then re-run [bold]python setup.py[/bold].",
+                    border_style="red",
+                    padding=(1, 4),
+                )
+            )
+        else:
+            print()
+            print("  Setup completed with errors.")
+            print("  Fix the FAIL items above, then re-run: python setup.py")
+            print()
+    else:
+        if _HAS_RICH:
+            _console.print(
+                Panel(
+                    "[bold green]Setup complete![/bold green]\n\n"
+                    "Run:  [bold cyan]python main.py --opus your_video.mp4[/bold cyan]",
+                    border_style="green",
+                    padding=(1, 4),
+                )
+            )
+        else:
+            print()
+            print("  Setup complete!")
+            print("  Run: python main.py --opus your_video.mp4")
+            print()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     run_setup()
