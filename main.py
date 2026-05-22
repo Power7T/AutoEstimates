@@ -8,10 +8,14 @@ Fully autonomous, viral-quality video editing powered by:
   • Real-time trend awareness
   • Personal taste learning
   • Vision-based CapCut control (no hardcoded selectors, self-healing)
+  • OpusClip-level long-form → viral clips pipeline
 
 Usage:
   # Director Mode — fully autonomous
   python main.py --director clip1.mp4 clip2.mp4 --platform instagram --style cinematic
+
+  # Opus Mode — long-form video to viral clips
+  python main.py --opus podcast.mp4 --clips 10 --export 5 --output ./viral_clips
 
   # Assistant Mode — give commands in plain English
   python main.py
@@ -39,6 +43,7 @@ from jarvis.director import JarvisDirector
 from jarvis.ai_brain import JarvisAssistant
 from jarvis.taste_learner import TasteLearner
 from jarvis.adapters import get_adapter, ADAPTERS
+from jarvis.opus_mode.pipeline import run_pipeline, print_results
 
 load_dotenv()
 console = Console()
@@ -175,10 +180,60 @@ def run_rating():
 # Entry point
 # ---------------------------------------------------------------------------
 
+async def run_opus(args):
+    """Opus Mode: long-form video → viral short clips."""
+    if not os.path.exists(args.opus):
+        console.print(f"[red]File not found:[/red] {args.opus}")
+        sys.exit(1)
+
+    console.print(f"\n[bold green]Opus Mode[/bold green] — Turning your video into viral clips.\n")
+    console.print(f"[dim]Source: {args.opus}[/dim]")
+    console.print(f"[dim]Finding top {args.export} of {args.clips} clips → {args.output}[/dim]\n")
+
+    result = run_pipeline(
+        video_path=args.opus,
+        output_dir=args.output,
+        n_clips=args.clips,
+        top_n_export=args.export,
+        style=args.caption_style,
+        whisper_model=args.whisper,
+        enable_reframe=not args.no_reframe,
+        enable_captions=not args.no_captions,
+        min_score=args.min_score,
+    )
+
+    print_results(result)
+    console.print(f"[bold green]Clips saved to:[/bold green] {args.output}")
+
+
 async def main():
     print_banner()
 
     parser = argparse.ArgumentParser(description="Jarvis AI Video Editor")
+
+    # Opus Mode
+    parser.add_argument("--opus", metavar="FILE",
+                        help="Opus Mode: path to long-form video to clip.")
+    parser.add_argument("--clips", type=int, default=10,
+                        help="Number of viral moments to find (default: 10).")
+    parser.add_argument("--export", type=int, default=5,
+                        help="Number of top clips to render (default: 5).")
+    parser.add_argument("--output", default="output/clips",
+                        help="Output directory for clips (default: output/clips).")
+    parser.add_argument("--caption-style", default="bold",
+                        choices=["bold", "clean", "kinetic"],
+                        help="Word-by-word caption style (default: bold).")
+    parser.add_argument("--whisper", default="base",
+                        choices=["tiny", "base", "small", "medium", "large"],
+                        help="Whisper model size (default: base).")
+    parser.add_argument("--no-reframe", action="store_true",
+                        help="Skip 9:16 smart reframe.")
+    parser.add_argument("--no-captions", action="store_true",
+                        help="Skip word-by-word captions.")
+    parser.add_argument("--min-score", type=float, default=0.0,
+                        help="Only export clips above this virality score (0-100).")
+
+    # Director Mode
     parser.add_argument("--director", nargs="+", metavar="FILE",
                         help="Director Mode: paths to video clips.")
     parser.add_argument("--platform", default="instagram",
@@ -199,6 +254,16 @@ async def main():
     # Rating mode — no browser needed
     if args.rate:
         run_rating()
+        return
+
+    # Opus Mode — no browser needed
+    if args.opus:
+        try:
+            cfg.validate()
+        except ValueError as e:
+            console.print(f"[red]Config error:[/red] {e}")
+            sys.exit(1)
+        await run_opus(args)
         return
 
     # Validate config
